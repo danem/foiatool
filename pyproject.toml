@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+    "foiatool"
+]
+
+[project]
+name = "foiatool"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [
+    {name = "Dane Mason", email = "danem.mason@gmail.com"}
+]
+requires-python = ">= 3.8"
+dynamic = ["version"]
+dependencies = [
+    "python-dateutil >= 2.9",
+    "peewee >=  3.17.0",
+    "requests >= 2.31.0",
+    "selenium",
+    "watchdog >= 4.0.0",
+    "webdriver-manager >= 4.0.1",
+    "tqdm",
+    "toml"
+]
+
+[project.scripts]
+foiatool = "foiatool.foiatool:main"
