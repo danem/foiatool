@@ -48,7 +48,7 @@ Run downloader:
 foiatool 
 ```
 
-##### FOIA Portals
+##### Example FOIA Portals
 
 - San Francisco
     - [Main Portal](https://sanfrancisco.nextrequest.com)
