@@ -2,11 +2,6 @@ import requests
 import pathlib
 import tqdm
 
-from selenium import webdriver
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service
-
-
 def normalize_file_name (
     download_dir: str,
     request_id: str,
@@ -17,8 +12,8 @@ def normalize_file_name (
     out_dir.mkdir(parents=True, exist_ok=True)
     return str(out_dir / file_name)
 
-def download_file(url: str, outpath: str, cookies = {}, headers = {}, display_progress: bool = False):
-    resp = requests.get(url, stream=True, allow_redirects=True, cookies=cookies, headers=headers)
+def download_file(session: requests.Session, url: str, outpath: str, display_progress: bool = False):
+    resp = session.get(url, stream=True, allow_redirects=True)
     resp.raise_for_status()
 
     total_size = int(resp.headers.get("content-length", 0))
@@ -36,14 +31,3 @@ def download_file(url: str, outpath: str, cookies = {}, headers = {}, display_pr
                     pbar.update(read_amt)
     finally:
         pbar.close()
-
-def initialize_selenium (download_dir: str, headless: bool):
-    chrome_options = webdriver.ChromeOptions()
-    chrome_options.add_experimental_option("prefs", {
-        "download.default_directory": download_dir
-    })
-    if headless:
-        chrome_options.add_argument("--headless")
-
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-    return driver
