@@ -11,10 +11,13 @@ import foiatool.apis.common as common
 import requests
 import concurrent.futures
 import time
+import threading
 import urllib
 import pathlib
+import curlify
 
 # TODO: Generalize this interface so we can support other platforms like GovQA
+# TODO: Get rid of Selenium, not worth the trouble
 class NextRequestAPI:
     IS_OPEN = 1
     IS_CLOSED = 1 << 1
@@ -33,11 +36,22 @@ class NextRequestAPI:
         self._driver = driver
         self._username = username
         self._password = password
+        self._download_dir = download_dir
 
-        self._monitor = common.FolderMonitor(download_dir)
-        
-
+    
+    def _get_cookies (self):
+        cookies = {c["name"]: c["value"] for c in self._driver.get_cookies()}
+        return cookies
+    
+    def _get_headers (self):
+        return {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "origin": f"{self._url}"
+        }
+    
     def sign_in (self):
+        # TODO: Get rid of selenium. 
         self._driver.get(f"{self._url}/users/sign_in")
 
         email_field = self._driver.find_element(By.ID, "user_email")
@@ -47,8 +61,59 @@ class NextRequestAPI:
         email_field.send_keys(self._username)
         pass_field.send_keys(self._password)
         login_btn.click()
-
     
+    def _initiate_bulk_download (self, request_id: str):
+        doc_ids = [dd["id"] for dd in self.get_docs_info_for_request(request_id).get("documents", [])]
+
+        post_data = dict(
+            request_id = request_id,
+            bulk_action = "download",
+            doc_ids = doc_ids
+        )
+        # TODO: I need to include the csrf token. Not sure how I will get it without selenium
+        headers = {**self._get_headers(), "referrer": f"{self._url}/requests/{request_id}"}
+        resp = requests.put(f"{self._url}/client/documents/bulk", json=post_data, allow_redirects=False, cookies=self._get_cookies(), headers=headers)
+        print(curlify.to_curl(resp.request))
+        resp.raise_for_status()
+
+        print(resp.content)
+        job_id = resp.json().get("jobId", [None])[0]
+        if not job_id:
+            raise Exception(f"Unable to initiate download: {resp.status_code}")
+
+        return job_id
+    
+    def _poll_background_job (self, request_id: str, job_id: str, job_type: str):
+        cookies = self._get_cookies()
+        headers = self._get_headers()
+        params = dict(pretty_id = request_id)
+
+        resp = requests.get(f"{self._url}/background_job_logs", params=params, cookies=cookies, headers=headers)
+        resp.raise_for_status()
+
+        data = resp.json()
+        for job in data.get("jobs", []):
+            if job.get("id") == job_id and job.get("status", "") == "working":
+                return True
+        return False
+
+    def _perform_bulk_download (self, request_id: str):
+        job_id = self._initiate_bulk_download(request_id)
+        while self._poll_background_job(request_id, job_id, "zipfile_creator"):
+            time.sleep(2) # Timing seen in browser
+
+        params = dict(jid = job_id, request_id = request_id)
+        resp = requests.get(f"{self._url}/client/documents/download", params=params, cookies=self._get_cookies(), headers=self._get_headers())
+        resp.raise_for_status()
+
+        data = resp.json()
+        url, fname = data["url"], data["filename"]
+
+        outpath = common.normalize_file_name(self._download_dir, request_id, fname)
+        common.download_file(url, outpath, cookies = self._get_cookies(), headers = self._get_headers(), display_progress=True)
+
+        return outpath
+
     def _perform_search (self, term: str, page: int, endpoint: str, open_mask: int = 0):
         params = dict(search_term = term, page_number = page)
         if open_mask & NextRequestAPI.IS_OPEN == NextRequestAPI.IS_OPEN:
@@ -90,50 +155,11 @@ class NextRequestAPI:
         params = dict(request_id = req_id)
         return requests.get(f"{self._url}/client/request_documents", params=params).json()
     
-    def download_docs_for_request (self, req_id: str) -> concurrent.futures.Future:
-        self._driver.get(f"{self._url}/requests/{req_id}")
-        waiter = WebDriverWait(self._driver, 30)
+    def download_docs_for_request (self, request_id: str) -> concurrent.futures.Future:
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            promise = pool.submit(self._perform_bulk_download, request_id)
 
-        doc_tab = waiter.until(
-            EC.presence_of_element_located((By.CSS_SELECTOR,  "button[tabindex='-1']"))
-        )
-        doc_tab.click()
-
-        download_all_chk = waiter.until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "input[aria-labelledby='select-all-documents-label']"))
-        )
-        time.sleep(2) # Hack
-        download_all_chk.click()
-
-
-        time.sleep(2) # Hack
-        if self._driver.find_elements(By.CLASS_NAME, "select-all-documents-view-button"):
-            select_all_btn = waiter.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".select-all-documents-view-button"))
-            )
-            time.sleep(1) # Hack
-            select_all_btn.click()
-
-
-        # Start waiting before we actually initiate the download to avoid deadlocks
-        promise = self._monitor.wait()
-
-        download_btn = waiter.until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "button[aria-label='Download documents']" ))
-        )
-        download_btn.click()
         return promise
-    
-    def download_doc_by_id (self, doc_id: str):
-        self._driver.get(f"{self._url}/documents/{doc_id}")
-        waiter = WebDriverWait(self._driver, 30)
-
-        download_btn = waiter.until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".fas.fa-download.qa-download-doc-icon"))
-        )
-        download_btn.click()
-
-
 
 def initialize_nextrequest_client (
     url: str,

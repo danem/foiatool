@@ -255,9 +255,17 @@ def main ():
     subparsers.add_parser("schedule", help="Schedule foiatool to run daily")
     subparsers.add_parser("unschedule", help="Unschedule foiatool")
 
+    init_parser = subparsers.add_parser("init", help="Initialize project")
+    init_parser.add_argument("dir", nargs="?", default="./")
+
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
+
+    if args.cmd == "init":
+        logging.info(f"Initializing foiatool in {os.path.abspath(args.dir)}")
+        fconfig.init_project(os.path.abspath(args.dir))
+        return
 
     if args.config:
         config = fconfig.load_config(args.config)
