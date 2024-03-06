@@ -18,14 +18,9 @@ foiatool init
 
 Edit the config file `foia/config.toml`:
 
-```
-
+```toml
 db_path = "<PATH TO FOIA DB>"
 download_path = "<PATH TO FOIA DOWNLOAD FOLDER>"
-selenium_headless = true
-show_progress = true
-download_timeout = 1200
-download_nice_seconds = 2
 
 [[request_config]]
 url = "https://sanfrancisco.nextrequest.com"
@@ -34,6 +29,18 @@ password = "<PASSWORD>"
 search_terms = ["police"]
 document_search_terms = ["budget"]
 ignore_ids = ["123"]
+download_timeout = 1200
+download_nice_seconds = 2
+
+[[request_config]]
+url = "https://another_site.nextrequest.com"
+user = "<USER NAME>"
+password = "<PASSWORD>"
+search_terms = []
+document_search_terms = []
+ignore_ids = []
+download_timeout = 1200
+download_nice_seconds = 2
 ```
 
 Run downloader:

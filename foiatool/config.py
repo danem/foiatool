@@ -30,7 +30,6 @@ class RequestConfig:
 class Config:
     db_path: str
     download_path: str
-    selenium_headless: bool
     request_config: List[RequestConfig]
 
 def default_config (root_dir: str):
