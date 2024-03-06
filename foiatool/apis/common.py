@@ -30,4 +30,12 @@ def download_file(session: requests.Session, url: str, outpath: str, display_pro
                 if pbar:
                     pbar.update(read_amt)
     finally:
-        pbar.close()
+        if pbar:
+            pbar.close()
+
+
+class DownloadException (Exception):
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)
+
+HTTPException = requests.HTTPError

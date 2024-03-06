@@ -98,12 +98,13 @@ class NextRequestAPI:
         resp.raise_for_status()
 
         data = resp.json()
-        url, fname = data["url"], data["filename"]
+        if not (url := data.get("url", "")) or not (fname := data.get("filename", "")):
+            raise common.DownloadException(f"Error zipping document: {data.get('message', '')}")
 
         outpath = common.normalize_file_name(self._download_dir, request_id, fname)
-        common.download_file(session, url, outpath, display_progress=True)
+        common.download_file(session, url, outpath, display_progress=False)
 
-        return outpath
+        return True, outpath
 
     def _perform_search (self, session: requests.Session, term: str, page: int, endpoint: str, open_mask: int = 0):
         params = dict(search_term = term, page_number = page)
@@ -162,6 +163,6 @@ def initialize_nextrequest_client (
 ) -> NextRequestAPI:
     url_parts = urllib.parse.urlparse(url)
     download_dir = pathlib.Path(download_root) / url_parts.netloc
-    download_dir.mkdir(exist_ok=True)
+    download_dir.mkdir(parents=True, exist_ok=True)
     download_dir = str(download_dir)
     return NextRequestAPI(url, download_dir, username, password)
