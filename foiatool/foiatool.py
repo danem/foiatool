@@ -270,10 +270,10 @@ def main ():
         stats = dbsess.get_stats()
         total = stats.total_request_count
         msg = f"""total_requests: {stats.total_request_count}
-error_requests: {stats.error_request_count} ({stats.error_request_count / total}%)
-pending_requests: {stats.pending_request_count} ({stats.pending_request_count / total}%)
-closed_requests: {stats.closed_request_count} ({stats.closed_request_count / total}%)
-downloaded_requests: {stats.downloaded_request_count} ({stats.downloaded_request_count / total}%)
+error_requests: {stats.error_request_count} ({stats.error_request_count / total})
+pending_requests: {stats.pending_request_count} ({stats.pending_request_count / total})
+closed_requests: {stats.closed_request_count} ({stats.closed_request_count / total})
+downloaded_requests: {stats.downloaded_request_count} ({stats.downloaded_request_count / total})
 document_count: {stats.document_count}"""
         print(msg)
         return
