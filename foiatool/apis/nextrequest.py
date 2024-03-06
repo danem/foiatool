@@ -118,7 +118,7 @@ class NextRequestAPI:
         page = 0
         consumed = 0
 
-        session = self._create_session()
+        session = self._get_session()
 
         resp = self._perform_search(session, term, page, endpoint, open_mask)
         total_count = resp.get("total_count", 0)
