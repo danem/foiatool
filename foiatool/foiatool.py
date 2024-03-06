@@ -120,8 +120,6 @@ def visit_pending_requests (
     error_count = 0
     pbar = tqdm.tqdm(pending)
     for req in pbar:
-        # Be nice
-        time.sleep(config.download_nice_seconds)
 
         pbar.set_description(f"Fetching request {req.request_id}")
         info = driver.get_request_info(req.request_id)
@@ -160,6 +158,9 @@ def visit_pending_requests (
                 dbsess.mark_document_error(req)
                 error_count += 1
                 pbar.set_postfix({"errors": error_count})
+
+        # Be nice
+        time.sleep(config.download_nice_seconds)
 
 def redownload_requests (
     config: fconfig.RequestConfig,
@@ -233,15 +234,12 @@ def main ():
 
     subparsers.add_parser("stats", help="Display stats about the database")
 
-    subparsers.add_parser("schedule", help="Schedule foiatool to run daily")
-    subparsers.add_parser("unschedule", help="Unschedule foiatool")
-
     init_parser = subparsers.add_parser("init", help="Initialize project")
     init_parser.add_argument("dir", nargs="?", default="./")
 
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     if args.cmd == "init":
         logging.info(f"Initializing foiatool in {os.path.abspath(args.dir)}")
@@ -252,6 +250,10 @@ def main ():
         config = fconfig.load_config(args.config)
     else:
         config = fconfig.find_config(os.getcwd())
+    
+    if not config:
+        logging.error("No foiatool config found")
+        return
     
     if msg := fconfig.verify_config(config):
         logging.error(msg)
@@ -301,7 +303,8 @@ document_count: {stats.document_count}"""
         url_parts = urllib.parse.urlparse(args.request_url)
         if res := apis_lut.get(url_parts.netloc):
             nrapi, conf = res
-            fetch_request(conf, dbsess, nrapi, url_parts.path)
+            req_id = url_parts.path.strip("/").split("/")[-1]
+            fetch_request(conf, dbsess, nrapi, req_id)
         else:
             logging.error(f"No configuration found for the provided url: {url_parts.netloc}")
             return

@@ -104,7 +104,7 @@ class NextRequestAPI:
         outpath = common.normalize_file_name(self._download_dir, request_id, fname)
         common.download_file(session, url, outpath, display_progress=False)
 
-        return True, outpath
+        return outpath
 
     def _perform_search (self, session: requests.Session, term: str, page: int, endpoint: str, open_mask: int = 0):
         params = dict(search_term = term, page_number = page)
