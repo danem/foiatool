@@ -59,6 +59,4 @@ foiatool
 
 - peewee
 - requests
-- selenium
-- watchdog
 

@@ -1,11 +1,3 @@
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-
-import watchdog.events as wevents
-import watchdog.observers.polling as wobservers
-
 import foiatool.apis.common as common
 
 import requests
@@ -13,6 +5,7 @@ import concurrent.futures
 import time
 import urllib
 import pathlib
+import lxml.html
 
 # TODO: Generalize this interface so we can support other platforms like GovQA
 class NextRequestAPI:
@@ -23,46 +16,112 @@ class NextRequestAPI:
 
     def __init__(
         self, 
-        driver: webdriver.Chrome,
         url: str,
         download_dir: str,
         username: str,
         password: str
     ) -> None:
         self._url = url.strip()
-        self._driver = driver
         self._username = username
         self._password = password
+        self._download_dir = download_dir
 
-        self._monitor = common.FolderMonitor(download_dir)
-        
+        self._session = requests.Session()
 
-    def sign_in (self):
-        self._driver.get(f"{self._url}/users/sign_in")
-
-        email_field = self._driver.find_element(By.ID, "user_email")
-        pass_field = self._driver.find_element(By.ID, "user_password")
-        login_btn = self._driver.find_element(By.CSS_SELECTOR, "#new_user > div.form__actions > button")
-
-        email_field.send_keys(self._username)
-        pass_field.send_keys(self._password)
-        login_btn.click()
-
+    def _get_csrf (self, page_txt: str):
+        # TODO: Maybe there's a better way to do this...
+        page = lxml.html.fromstring(page_txt)
+        if meta_element := page.xpath("//meta[@name='csrf-token']"):
+            return meta_element[0].get("content")
+        return None
     
-    def _perform_search (self, term: str, page: int, endpoint: str, open_mask: int = 0):
+    def _get_session (self, csrf_url: str = None) -> requests.Session:
+        if csrf_url:
+            page = self._session.get(csrf_url)
+            page.raise_for_status()
+
+            csrf = self._get_csrf(page.content)
+            self._session.headers.update({"x-csrf-token": csrf})
+
+        return self._session
+    
+    def sign_in (self):
+        url = f"{self._url}/users/sign_in"
+        sess = self._get_session(url)
+
+        csrf = sess.headers.get("x-csrf-token")
+        payload = {
+            "authenticity_token": csrf,
+            "user[email]": self._username,
+            "user[password]": self._password
+        }
+        resp = sess.post(url, params=payload)
+        resp.raise_for_status()
+    
+    
+    def _initiate_bulk_download (self, sess: requests.Session, request_id: str):
+        doc_ids = [dd["id"] for dd in self.get_docs_info_for_request(request_id).get("documents", [])]
+
+        post_data = dict(
+            request_id = request_id,
+            bulk_action = "download",
+            doc_ids = doc_ids
+        )
+
+        resp = sess.put(f"{self._url}/client/documents/bulk", json=post_data)
+        resp.raise_for_status()
+
+        job_id = resp.json().get("jobId", [None])[0]
+        if not job_id:
+            raise Exception(f"Unable to initiate download: {resp.status_code}")
+
+        return job_id
+    
+    def _poll_background_job (self, sess: requests.Session, request_id: str, job_id: str, job_type: str):
+        resp = sess.get(f"{self._url}/background_job_logs", params=dict(pretty_id = request_id))
+        resp.raise_for_status()
+
+        for job in resp.json().get("jobs", []):
+            if job.get("id") == job_id and job.get("status", "") == "working":
+                return True
+        return False
+
+    def _perform_bulk_download (self, request_id: str):
+        session = self._get_session(f"{self._url}/requests/{request_id}")
+
+        job_id = self._initiate_bulk_download(session, request_id)
+        while self._poll_background_job(session, request_id, job_id, "zipfile_creator"):
+            time.sleep(2) # Timing seen in browser
+
+        params = dict(jid = job_id, request_id = request_id)
+        resp = session.get(f"{self._url}/client/documents/download", params=params)
+        resp.raise_for_status()
+
+        data = resp.json()
+        if not (url := data.get("url", "")) or not (fname := data.get("filename", "")):
+            raise common.DownloadException(f"Error zipping document: {data.get('message', '')}")
+
+        outpath = common.normalize_file_name(self._download_dir, request_id, fname)
+        common.download_file(session, url, outpath, display_progress=False)
+
+        return True, outpath
+
+    def _perform_search (self, session: requests.Session, term: str, page: int, endpoint: str, open_mask: int = 0):
         params = dict(search_term = term, page_number = page)
         if open_mask & NextRequestAPI.IS_OPEN == NextRequestAPI.IS_OPEN:
             params["open"] = True
         if open_mask & NextRequestAPI.IS_CLOSED == NextRequestAPI.IS_CLOSED:
             params["closed"] = True
-
-        return requests.get(f"{self._url}/client/{endpoint}", params=params).json()
+        
+        return session.get(f"{self._url}/client/{endpoint}", params=params).json()
     
     def _search (self, term: str, endpoint: str, open_mask: int = 0):
         page = 0
         consumed = 0
 
-        resp = self._perform_search(term, page, endpoint, open_mask)
+        session = self._get_session()
+
+        resp = self._perform_search(session, term, page, endpoint, open_mask)
         total_count = resp.get("total_count", 0)
 
         while consumed < total_count:
@@ -71,7 +130,7 @@ class NextRequestAPI:
             yield reqs
 
             page += 1
-            resp = self._perform_search(term, page, endpoint, open_mask)
+            resp = self._perform_search(session, term, page, endpoint, open_mask)
     
     def search_requests (self, term: str, open_mask: int = 0):
         return self._search(term, NextRequestAPI.REQUESTS_ENDPOINT, open_mask)
@@ -90,62 +149,20 @@ class NextRequestAPI:
         params = dict(request_id = req_id)
         return requests.get(f"{self._url}/client/request_documents", params=params).json()
     
-    def download_docs_for_request (self, req_id: str) -> concurrent.futures.Future:
-        self._driver.get(f"{self._url}/requests/{req_id}")
-        waiter = WebDriverWait(self._driver, 30)
+    def download_docs_for_request (self, request_id: str) -> concurrent.futures.Future:
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            promise = pool.submit(self._perform_bulk_download, request_id)
 
-        doc_tab = waiter.until(
-            EC.presence_of_element_located((By.CSS_SELECTOR,  "button[tabindex='-1']"))
-        )
-        doc_tab.click()
-
-        download_all_chk = waiter.until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "input[aria-labelledby='select-all-documents-label']"))
-        )
-        time.sleep(2) # Hack
-        download_all_chk.click()
-
-
-        time.sleep(2) # Hack
-        if self._driver.find_elements(By.CLASS_NAME, "select-all-documents-view-button"):
-            select_all_btn = waiter.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".select-all-documents-view-button"))
-            )
-            time.sleep(1) # Hack
-            select_all_btn.click()
-
-
-        # Start waiting before we actually initiate the download to avoid deadlocks
-        promise = self._monitor.wait()
-
-        download_btn = waiter.until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "button[aria-label='Download documents']" ))
-        )
-        download_btn.click()
         return promise
-    
-    def download_doc_by_id (self, doc_id: str):
-        self._driver.get(f"{self._url}/documents/{doc_id}")
-        waiter = WebDriverWait(self._driver, 30)
-
-        download_btn = waiter.until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".fas.fa-download.qa-download-doc-icon"))
-        )
-        download_btn.click()
-
-
 
 def initialize_nextrequest_client (
     url: str,
-    download_path: str,
+    download_root: str,
     username: str,
     password: str,
-    headless: bool
 ) -> NextRequestAPI:
     url_parts = urllib.parse.urlparse(url)
-    download_dir = pathlib.Path(download_path) / url_parts.netloc
-    download_dir.mkdir(exist_ok=True)
+    download_dir = pathlib.Path(download_root) / url_parts.netloc
+    download_dir.mkdir(parents=True, exist_ok=True)
     download_dir = str(download_dir)
-
-    driver = common.initialize_selenium(download_dir, headless)
-    return NextRequestAPI(driver, url, download_dir, username, password)
+    return NextRequestAPI(url, download_dir, username, password)

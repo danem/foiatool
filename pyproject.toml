@@ -20,11 +20,9 @@ dependencies = [
     "python-dateutil >= 2.9",
     "peewee >=  3.17.0",
     "requests >= 2.31.0",
-    "selenium",
-    "watchdog >= 4.0.0",
-    "webdriver-manager >= 4.0.1",
     "tqdm",
-    "toml"
+    "toml",
+    "lxml"
 ]
 
 [project.scripts]

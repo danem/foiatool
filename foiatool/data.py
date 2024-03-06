@@ -101,7 +101,7 @@ class DBSession:
                 request_id = request_id,
                 needs_download = needs_download,
                 request_status = RequestStatus.PENDING.value,
-                date_submitted = "",
+                date_submitted = datetime.datetime.now(),
                 date_checked = datetime.datetime.now(), # TODO: Hack, need to update the schema
                 document_paths = "",
                 department = "",

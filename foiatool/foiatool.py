@@ -11,11 +11,7 @@ import dateutil.parser as dparser
 import logging
 import time
 import os
-import pathlib
 import urllib.parse
-
-def _get_download_dir_for_config ():
-    pass
 
 def _parse_datetime(txt: str, permissive:bool = False):
     return dparser.parse(txt, fuzzy=permissive)
@@ -50,19 +46,6 @@ class OverWriteGuard:
             if os.path.exists(self._backup):
                 os.remove(self._backup)
 
-def normalize_file_name (
-    config: fconfig.RequestConfig,
-    request: fdb.DocumentRequest,
-    file_name: str
-) -> pathlib.Path:
-    doc_date = request.date_submitted.strftime("%Y%m%d")
-    folder_name = f"{request.request_id}_{doc_date}"
-    out_path = pathlib.Path(config.url) / folder_name
-    if os.path.splitext(file_name)[-1] not in [".zip"]:
-        out_path /= os.path.basename(file_name)
-    else:
-        out_path = out_path.with_suffix(".zip")
-    return out_path
 
 
 def fetch_new_requests (
@@ -134,6 +117,7 @@ def visit_pending_requests (
 
     driver.sign_in()
 
+    error_count = 0
     pbar = tqdm.tqdm(pending)
     for req in pbar:
         # Be nice
@@ -169,16 +153,13 @@ def visit_pending_requests (
             try:
                 promise = driver.download_docs_for_request(req.request_id)
                 pbar.set_description(f"Waiting for documents to download for {req.request_id}")
-                result = promise.result(config.download_timeout_seconds)
-
-                new_path = normalize_file_name(config, req, result)
-                new_path.parent.mkdir(parents=True, exist_ok=True)
-                pathlib.Path(result).rename(new_path)
-
-                dbsess.mark_document_downloaded(req, str(new_path), doc_count)
-            except (TimeoutError, concurrent.futures.InvalidStateError):
+                result_path = promise.result(config.download_timeout_seconds)
+                dbsess.mark_document_downloaded(req, result_path, doc_count)
+            except (TimeoutError, concurrent.futures.InvalidStateError, fapi.DownloadException, fapi.HTTPException):
                 # for some reason the document failed to download. Ignore this document
                 dbsess.mark_document_error(req)
+                error_count += 1
+                pbar.set_postfix({"errors": error_count})
 
 def redownload_requests (
     config: fconfig.RequestConfig,
@@ -255,9 +236,17 @@ def main ():
     subparsers.add_parser("schedule", help="Schedule foiatool to run daily")
     subparsers.add_parser("unschedule", help="Unschedule foiatool")
 
+    init_parser = subparsers.add_parser("init", help="Initialize project")
+    init_parser.add_argument("dir", nargs="?", default="./")
+
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
+
+    if args.cmd == "init":
+        logging.info(f"Initializing foiatool in {os.path.abspath(args.dir)}")
+        fconfig.init_project(os.path.abspath(args.dir))
+        return
 
     if args.config:
         config = fconfig.load_config(args.config)
@@ -295,7 +284,6 @@ document_count: {stats.document_count}"""
             rc.url,
             config.download_path,
             rc.user, rc.password,
-            config.selenium_headless
         )
         apis_lut[url_parts.netloc] = (api, rc)
 
