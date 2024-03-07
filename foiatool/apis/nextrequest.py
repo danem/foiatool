@@ -73,7 +73,7 @@ class NextRequestAPI:
 
         job_id = resp.json().get("jobId", [None])[0]
         if not job_id:
-            raise Exception(f"Unable to initiate download: {resp.status_code}")
+            raise common.DownloadException(f"Unable to initiate download: {resp.status_code}")
 
         return job_id
     
