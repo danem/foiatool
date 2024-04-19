@@ -39,7 +39,6 @@ def default_config (root_dir: str):
 
     return Config(
         db_path=str(root_dir / __FOIATOOLS_DB__),
-        selenium_headless=True,
         download_path=str(download_dir),
         request_config=[
             RequestConfig(

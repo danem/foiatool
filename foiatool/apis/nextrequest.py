@@ -154,6 +154,9 @@ class NextRequestAPI:
             promise = pool.submit(self._perform_bulk_download, request_id)
 
         return promise
+    
+    def download_dir (self):
+        return self._download_dir
 
 def initialize_nextrequest_client (
     url: str,

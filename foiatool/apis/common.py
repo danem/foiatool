@@ -39,3 +39,4 @@ class DownloadException (Exception):
         super().__init__(*args)
 
 HTTPException = requests.HTTPError
+ConnectionException = requests.ConnectionError

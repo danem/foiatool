@@ -3,6 +3,7 @@ import enum
 import datetime
 from typing import List, Tuple, Union, Optional
 import dataclasses
+import hashlib
 
 class RequestStatus (enum.Enum):
     PENDING = 1
@@ -23,7 +24,7 @@ class DatabaseStats:
 # Because I have very minimal performance requirements
 # I'll just use SQLite as a persistent queue
 # If I ever feel the need to scale this up I'll 
-# switch to something better. This has advantage of allowing us
+# switch to something better. This has the advantage of allowing us
 # to easily keep track of stats, history, etc on top of the queue.
 db = pw.SqliteDatabase("")
 
@@ -39,6 +40,7 @@ class DocumentRequest (pw.Model):
     request_status = pw.IntegerField()
     document_count = pw.IntegerField()
     needs_download = pw.BooleanField(default=True)
+    download_checksum = pw.CharField(null = True)
 
     class Meta:
         database = db
@@ -52,8 +54,11 @@ class ScrapeMetadata (pw.Model):
     class Meta:
         database = db
         constraints = [pw.SQL("UNIQUE (scrape_source)")]
-    
 
+def get_doc_md5 (file_path: str):
+    with open(file_path, 'rb') as f:
+        return hashlib.md5(f.read()).hexdigest()
+    
 class DBSession:
     def __init__(self,  db_path: str) -> None:
         db.init(db_path)
@@ -128,8 +133,11 @@ class DBSession:
         self,
         request: DocumentRequest,
         paths: str,
-        count: int = 0
+        count: int = 0,
+        checksum: str = None
     ):
+        checksum = checksum if checksum else get_doc_md5(paths)
+
         self.update_request(
             request,
             request_status = RequestStatus.DOWNLOADED.value,

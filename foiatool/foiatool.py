@@ -153,8 +153,8 @@ def visit_pending_requests (
                 pbar.set_description(f"Waiting for documents to download for {req.request_id}")
                 result_path = promise.result(config.download_timeout_seconds)
                 dbsess.mark_document_downloaded(req, result_path, doc_count)
-            except (TimeoutError, concurrent.futures.InvalidStateError, fapi.DownloadException, fapi.HTTPException):
-                # for some reason the document failed to download. Ignore this document
+            except (TimeoutError, concurrent.futures.InvalidStateError, fapi.DownloadException, fapi.HTTPException, fapi.ConnectionException):
+                # for some reason the document failed to download. Ignore this document for the time being
                 dbsess.mark_document_error(req)
                 error_count += 1
                 pbar.set_postfix({"errors": error_count})
@@ -178,28 +178,43 @@ def redownload_requests (
     visit_pending_requests(config, dbsess, nrapi)
 
 
+# Finds records whose downloaded document has been moved or deleted.
+# This can fix the database if the whole project folder has been moved.
+# TODO: I shouldn't store the entire download path, but instead the 
+# path relative to the root download folder.
 def repair_data (
     config: fconfig.RequestConfig,
     dbsess: fdb.DBSession,
     nrapi: fapi.NextRequestAPI
 ):
+    logging.info("Creating downloaded document index")
+
+    index = {}
+    for dpath, _, files in os.walk(nrapi.download_dir()):
+        for file in files:
+            fpath = os.path.join(dpath, file)
+            chksum = fdb.get_doc_md5(fpath)
+            index[chksum] = fpath
+
     logging.info("Repairing data and ensuring integrity")
+
     pbar = tqdm.tqdm(dbsess.get_requests())
     bad_count = 0
 
     for req in pbar:
         pbar.set_description(f"Checking request: {req.request_id}")
 
-        fname = os.path.basename(req.document_paths)
         if req.request_id in config.ignore_ids:
             dbsess.mark_document_error(req)
             bad_count += 1
 
         elif req.request_status == fdb.RequestStatus.DOWNLOADED.value:
-            if (not os.path.exists(req.document_paths) 
-                or fname.startswith(".com.google.Chrome")):
-                dbsess.mark_document_pending(req)
-                bad_count += 1
+            if (not os.path.exists(req.document_paths)):
+                if npath := index.get(req.download_checksum, ""):
+                    dbsess.mark_document_downloaded(req, npath, req.document_count, req.download_checksum)
+                else:
+                    dbsess.mark_document_pending(req)
+                    bad_count += 1
     
     logging.info(f"Found {bad_count} broken records")
     visit_pending_requests(config, dbsess, nrapi)
@@ -218,6 +233,8 @@ def fetch_request (
 def main ():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", nargs="?", help="Path to config file. If not supplied, it will be automatically found")
+    parser.add_argument("--no-search", default=False, action="store_true", help="Skip searching")
+
 
     subparsers = parser.add_subparsers(title='action', dest='cmd')
 
@@ -310,7 +327,8 @@ document_count: {stats.document_count}"""
             return
     else:
         for nrapi, conf in apis_lut.values():
-            fetch_new_requests(conf, dbsess, nrapi)
+            if not args.no_search:
+                fetch_new_requests(conf, dbsess, nrapi)
             visit_pending_requests(conf, dbsess, nrapi)
 
 
