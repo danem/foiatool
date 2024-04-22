@@ -109,10 +109,10 @@ def find_project_dir (start_dir = None):
 
     return None
 
-def find_config (start_dir = None):
-    if pdir := find_project_dir(os.path.abspath(start_dir)):
+def find_config_path (start_dir = None):
+    if pdir := find_project_dir(start_dir):
         path = os.path.join(pdir, "config.toml")
-        return load_config(path)
+        return str(path)
     return None
 
 # TODO: Use pydantic

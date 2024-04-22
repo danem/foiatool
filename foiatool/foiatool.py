@@ -5,13 +5,13 @@ import foiatool.apis as fapi
 import argparse
 import tqdm
 from typing import List, Optional, Union
-import datetime
-import concurrent.futures
 import dateutil.parser as dparser
 import logging
 import time
 import os
 import urllib.parse
+import concurrent
+import datetime
 
 def _parse_datetime(txt: str, permissive:bool = False):
     return dparser.parse(txt, fuzzy=permissive)
@@ -25,83 +25,61 @@ def get_user_choice (prompt, default = False):
     if choice.lower() in yeses or (len(choice) == 0 and default):
         return True
     return False
-
-# Safely overwrite existing files. This is necessary because of how
-# selenium works. AFAIK there's no easy way to monitor downloads etc
-class OverWriteGuard:
-    def __init__ (self, path):
-        path = path if path else ""
-        self._path = path
-        self._backup = path + ".bak"
     
-    def __enter__ (self):
-        if self._path and os.path.exists(self._path):
-            os.rename(self._path, self._backup)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if not os.path.exists(self._path) and os.path.exists(self._backup):
-            os.rename(self._backup, self._path)
-        else:
-            if os.path.exists(self._backup):
-                os.remove(self._backup)
-
-
 
 def fetch_new_requests (
     config: fconfig.RequestConfig, 
     dbsess: fdb.DBSession,
     driver: fapi.NextRequestAPI
 ):
-    last_update = dbsess.get_last_scrape_date(config.url)
-    initial_count = len(dbsess.get_requests())
-    logging.info(f"Fetching latest request updates for search terms {config.search_terms}")
-    logging.info(f"Fetching latest documents for search terms {config.document_search_terms}")
-    logging.info(f"Index last updated on {last_update}")
+    with dbsess.atomic():
+        last_update = dbsess.get_last_scrape_date(config.url)
+        initial_count = len(dbsess.get_tasks())
+        logging.info(f"Fetching latest request updates for search terms {config.search_terms}")
+        logging.info(f"Fetching latest documents for search terms {config.document_search_terms}")
+        logging.info(f"Index last updated on {last_update}")
 
-    # Search foia requests
-    pbar = tqdm.tqdm()
-    pbar.set_description("Searching Requests")
-    for term in config.search_terms:
-        for page in driver.search_requests(term, fapi.NextRequestAPI.IS_CLOSED):
-            for item in page:
-                if dbsess.get_request(item["id"], config.url) or item["id"] in config.ignore_ids:
-                    continue
-                dbsess.add_pending_document_request(config.url, item.get("id"))
-                pbar.update(1)
+        # Search foia requests
+        pbar = tqdm.tqdm()
+        pbar.set_description("Searching Requests")
+        for term in config.search_terms:
+            for page in driver.search_requests(term, fapi.NextRequestAPI.IS_CLOSED):
+                for item in page:
+                    if dbsess.get_request(item["id"], config.url) or item["id"] in config.ignore_ids:
+                        continue
+                    dbsess.add_bulk_download_task(item["id"])
+                    pbar.update(1)
 
-            # Be nice
-            time.sleep(config.download_nice_seconds)
-    pbar.close()
+                # Be nice
+                time.sleep(config.download_nice_seconds)
+        pbar.close()
 
-    # TODO: It may be possible that there are documents that appear in the document search portal, 
-    # but aren't available for download via the request download page. I haven't seen any instance
-    # of this myself, but it is something to look out for, and the code as is, doesn't handle it.
-    # A more robust approach would require changing the DB schema, and complicating a bunch of other
-    # thigs, so I won't address it until I need to.
+        # Search through documents
+        pbar = tqdm.tqdm()
+        pbar.set_description("Searching Documents")
+        for term in config.document_search_terms:
+            for page in driver.search_documents(term):
+                for item in page:
+                    # some documents aren't associated with a request...
+                    request_id = item.get("pretty_id", None)
+                    doc_id = item["id"]
+                    title = item["title"]
+                    fname = f"{doc_id}_{title}"
 
-    # Search through documents
-    pbar = tqdm.tqdm()
-    pbar.set_description("Searching Documents")
-    for term in config.document_search_terms:
-        for page in driver.search_documents(term):
-            for item in page:
-                # Make sure we haven't already downloaded all of the documents from this request
-                parent_request = dbsess.get_request(item.get("pretty_id"), config.url)
-                if parent_request and parent_request.request_status == fdb.RequestStatus.DOWNLOADED:
-                    continue
+                    if not request_id or dbsess.get_download(request_id, doc_id):
+                        continue
 
-                dbsess.add_pending_document_request(config.url, item.get("pretty_id"))
-                pbar.update(1)
+                    dbsess.add_download_task(request_id, doc_id, fname)
+                    pbar.update(1)
 
-            # Be nice
-            time.sleep(config.download_nice_seconds)
-    pbar.close()
+                # Be nice
+                time.sleep(config.download_nice_seconds)
+        pbar.close()
 
-    dbsess.update_scrape_date(config.url)
+        dbsess.update_scrape_date(config.url)
 
-    new_count = len(dbsess.get_requests())
-    logging.info(f"Fetching complete. Found {new_count - initial_count} new documents")
+        new_count = len(dbsess.get_tasks())
+        logging.info(f"Fetching complete. Found {new_count - initial_count} new documents")
 
 
 def visit_pending_requests (
@@ -109,8 +87,7 @@ def visit_pending_requests (
     dbsess: fdb.DBSession,
     driver: fapi.NextRequestAPI
 ):
-    pending = dbsess.get_open_requests()
-    pending = [r for r in pending if r.request_id not in config.ignore_ids]
+    pending = dbsess.get_tasks()
 
     logging.info(f"Found {len(pending)} requests in the queue. Visiting")
     logging.info(f"Ignoring requests: {config.ignore_ids}")
@@ -120,45 +97,46 @@ def visit_pending_requests (
     error_count = 0
     pbar = tqdm.tqdm(pending)
     for req in pbar:
+        pbar.set_description(f"Fetching request {req.task_target_id}")
+        req_info = driver.get_request_info(req.task_target_id)
+        req_status = fdb.status_from_str(req_info["request_state"])
 
-        pbar.set_description(f"Fetching request {req.request_id}")
-        info = driver.get_request_info(req.request_id)
-        if info.get("request_state") != "Closed":
-            continue
-        
-        req_info = driver.get_request_info(req.request_id)
-        doc_info = driver.get_docs_info_for_request(req.request_id)
+        dept_names = req_info["department_names"]
+        doc_info = driver.get_docs_info_for_request(req_info["pretty_id"])
         doc_count = doc_info.get("total_documents_count", 0)
-        # TODO: Not 100% sure this can be trusted
-        if doc_count == 0:
-            dbsess.mark_document_closed(req)
-            continue
-
         request_date = _parse_datetime(req_info.get("request_date", ""), True)
-        
-        # Set request metadata
-        dbsess.update_document_metadata(
-            req,
-            document_count = doc_count,
-            department = req_info.get("department_names"),
-            date_submitted = request_date
+
+        foia_request = dbsess.add_request(
+            config.url,
+            req_info["pretty_id"],
+            req_status,
+            request_date,
+            dept_names,
+            doc_count
         )
 
-        if not req.needs_download:
+        if req.task_type not in [fdb.TaskType.DOWNLOAD.value, fdb.TaskType.BULK_DOWNLOAD.value]:
             continue
 
-        with OverWriteGuard(req.document_paths) as _:
-            try:
-                promise = driver.download_docs_for_request(req.request_id)
-                pbar.set_description(f"Waiting for documents to download for {req.request_id}")
+        try:
+            pbar.set_description(f"Waiting for documents to download for {req.task_target_id}")
+            if req.task_type == fdb.TaskType.DOWNLOAD.value:
+                promise = driver.download_document(req.task_target_id, req.document_id, req.document_name)
                 result_path = promise.result(config.download_timeout_seconds)
-                dbsess.mark_document_downloaded(req, result_path, doc_count)
-            except (TimeoutError, concurrent.futures.InvalidStateError, fapi.DownloadException, fapi.HTTPException, fapi.ConnectionException):
-                # for some reason the document failed to download. Ignore this document for the time being
-                dbsess.mark_document_error(req)
-                error_count += 1
-                pbar.set_postfix({"errors": error_count})
+                dbsess.add_download(foia_request, result_path, req.document_id)
+            else:
+                if req_status != fdb.RequestStatus.CLOSED:
+                    continue
+                promise = driver.download_docs_for_request(req.request_id)
+                result_path = promise.result(config.download_timeout_seconds)
+                dbsess.add_bulk_download(foia_request, result_path)
+        except (TimeoutError, concurrent.futures.InvalidStateError, fapi.DownloadException, fapi.HTTPException, fapi.ConnectionException):
+            # for some reason the document failed to download. Ignore this document for the time being
+            dbsess.mark_request_error(foia_request)
+            error_count += 1
+            pbar.set_postfix({"errors": error_count})
 
+        dbsess.mark_task_completed(req)
         # Be nice
         time.sleep(config.download_nice_seconds)
 
@@ -226,7 +204,7 @@ def fetch_request (
     request_id
 ):
     logging.info("Fetching a single request")
-    dbsess.add_pending_document_request(config.url, request_id, True)
+    dbsess.add_bulk_download_task(request_id)
     visit_pending_requests(config, dbsess, nrapi)
 
 
@@ -265,23 +243,22 @@ def main ():
 
     if args.config:
         config = fconfig.load_config(args.config)
+        logging.info(f"Found config at {args.config}")
     else:
-        config = fconfig.find_config(os.getcwd())
+        path = fconfig.find_config_path(os.getcwd())
+        config = fconfig.load_config(path)
+        logging.info(f"Found config at {path}")
     
     if not config:
         logging.error("No foiatool config found")
         return
     
-    if msg := fconfig.verify_config(config):
-        logging.error(msg)
-        return
-
     dbsess = fdb.DBSession(config.db_path)
 
     # Selenium not needed
     if args.cmd == "clear-pending":
         logging.info("Clearing pending queue")
-        dbsess.remove_pending()
+        dbsess.clear_tasks()
         return
     elif args.cmd == "stats":
         stats = dbsess.get_stats()

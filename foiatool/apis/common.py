@@ -1,18 +1,28 @@
 import requests
 import pathlib
 import tqdm
+import os
+
+def truncate_file_name (
+    file_name: str
+):
+    fname, ext = os.path.splitext(file_name)
+    tlen = 255 - len(ext)
+    return fname[:tlen] + ext
 
 def normalize_file_name (
     download_dir: str,
     request_id: str,
     file_name: str
 ):
-    folder_name = f"{request_id}"
+    # Some documents don't have requests associated with them
+    folder_name = f"{request_id}" if request_id else "orphans"
     out_dir = pathlib.Path(download_dir) / folder_name
     out_dir.mkdir(parents=True, exist_ok=True)
+    file_name = truncate_file_name(file_name)
     return str(out_dir / file_name)
 
-def download_file(session: requests.Session, url: str, outpath: str, display_progress: bool = False):
+def download_file(session: requests.Session, url: str, outpath: str = None, display_progress: bool = False):
     resp = session.get(url, stream=True, allow_redirects=True)
     resp.raise_for_status()
 

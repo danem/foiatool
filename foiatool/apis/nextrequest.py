@@ -27,6 +27,7 @@ class NextRequestAPI:
         self._download_dir = download_dir
 
         self._session = requests.Session()
+        self._session.headers["user-agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 
     def _get_csrf (self, page_txt: str):
         # TODO: Maybe there's a better way to do this...
@@ -58,7 +59,15 @@ class NextRequestAPI:
         resp = sess.post(url, params=payload)
         resp.raise_for_status()
     
-    
+    def _download_document (self, request_id, doc_id, fname):
+        # TODO: If there were some API to get document info from doc_id 
+        # I'd only need doc_id and not request_id or fname
+        session = self._get_session()
+        outpath = common.normalize_file_name(self._download_dir, request_id, fname)
+        url = f"{self._url}/documents/{doc_id}/download"
+        common.download_file(session, url, outpath)
+        return outpath
+
     def _initiate_bulk_download (self, sess: requests.Session, request_id: str):
         doc_ids = [dd["id"] for dd in self.get_docs_info_for_request(request_id).get("documents", [])]
 
@@ -152,7 +161,11 @@ class NextRequestAPI:
     def download_docs_for_request (self, request_id: str) -> concurrent.futures.Future:
         with concurrent.futures.ThreadPoolExecutor() as pool:
             promise = pool.submit(self._perform_bulk_download, request_id)
-
+        return promise
+    
+    def download_document (self, request_id: str, doc_id: str, doc_name: str) -> concurrent.futures.Future:
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            promise = pool.submit(self._download_document, request_id, doc_id, doc_name)
         return promise
     
     def download_dir (self):

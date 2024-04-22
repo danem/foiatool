@@ -11,6 +11,19 @@ class RequestStatus (enum.Enum):
     DOWNLOADED = 3
     ERROR = 4
 
+def status_from_str (status: str):
+    lut = dict(
+        closed = RequestStatus.CLOSED,
+        open = RequestStatus.PENDING
+    )
+    return lut[status.lower()]
+    
+
+class TaskType (enum.Enum):
+    DOWNLOAD = 0
+    BULK_DOWNLOAD = 1
+    UPDATE_METADATA = 2
+
 @dataclasses.dataclass
 class DatabaseStats:
     total_request_count: int
@@ -28,23 +41,42 @@ class DatabaseStats:
 # to easily keep track of stats, history, etc on top of the queue.
 db = pw.SqliteDatabase("")
 
-class DocumentRequest (pw.Model):
+class FOIARequest (pw.Model):
     id = pw.PrimaryKeyField()
     date_submitted = pw.DateField()
     date_checked = pw.DateField()
-    date_downloaded = pw.DateField(null = True)
-    document_paths = pw.CharField()
     department = pw.CharField()
     scrape_source = pw.CharField()
     request_id = pw.CharField()
     request_status = pw.IntegerField()
     document_count = pw.IntegerField()
-    needs_download = pw.BooleanField(default=True)
-    download_checksum = pw.CharField(null = True)
 
     class Meta:
         database = db
         constraints = [pw.SQL("UNIQUE (scrape_source, request_id)")]
+
+class DocumentDownload (pw.Model):
+    id = pw.PrimaryKeyField()
+    request = pw.ForeignKeyField(FOIARequest, null = True)
+    document_id = pw.CharField(null = True)
+    date_downloaded = pw.DateField()
+    is_bulk = pw.BooleanField()
+    download_path = pw.CharField()
+    checksum = pw.CharField()
+    document_count = pw.IntegerField()
+
+    class Meta:
+        database = db
+
+class WorkQueue (pw.Model):
+    id = pw.PrimaryKeyField()
+    task_type = pw.IntegerField()
+    task_target_id = pw.CharField(null = True) # some documents don't have requests
+    document_name = pw.CharField(null = True)
+    document_id = pw.CharField(null = True)
+
+    class Meta:
+        database = db
 
 class ScrapeMetadata (pw.Model):
     id = pw.PrimaryKeyField()
@@ -64,98 +96,153 @@ class DBSession:
         db.init(db_path)
         db.connect()
         db.create_tables([
-            DocumentRequest,
+            FOIARequest,
+            DocumentDownload,
+            WorkQueue,
             ScrapeMetadata
         ])
+    
+    def atomic (self):
+        return db.atomic()
     
     def get_requests (
         self,
         query = None
     ):
-        return DocumentRequest.select().where(query)
+        return FOIARequest.select().where(query)
     
     def get_request (
         self,
         request_id: str,
         scrape_source: str,
-    ) -> Optional[DocumentRequest]:
-        return (DocumentRequest.get_or_none(
-            (DocumentRequest.scrape_source == scrape_source) & 
-            (DocumentRequest.request_id == request_id)
+    ) -> Optional[FOIARequest]:
+        return (FOIARequest.get_or_none(
+            (FOIARequest.scrape_source == scrape_source) & 
+            (FOIARequest.request_id == request_id)
         ))
     
-    def update_request (self, req: DocumentRequest, **kwargs):
-        where = DocumentRequest.id == req.id
-        DocumentRequest.update(
+    def update_request (self, req: FOIARequest, **kwargs):
+        where = FOIARequest.id == req.id
+        FOIARequest.update(
             **kwargs
         ).where(where).execute()
     
-    
-    def add_pending_document_request (
+    def add_request (
         self,
         scrape_source: str,
         request_id: str,
-        needs_download: bool = True # Sometimes we want to just refresh the metadata
+        request_status: RequestStatus,
+        request_date: datetime.datetime,
+        department: str,
+        document_count: int
     ):
         if req := self.get_request(request_id, scrape_source):
-            self.mark_document_pending(req)
             return req
         else:
-            req = (DocumentRequest.create(
+            req = (FOIARequest.create(
                 scrape_source = scrape_source,
                 request_id = request_id,
-                needs_download = needs_download,
-                request_status = RequestStatus.PENDING.value,
-                date_submitted = datetime.datetime.now(),
-                date_checked = datetime.datetime.now(), # TODO: Hack, need to update the schema
-                document_paths = "",
-                department = "",
-                document_count = 0
+                date_submitted = request_date,
+                date_checked = datetime.datetime.now(),
+                department = department,
+                document_count = document_count,
+                request_status = request_status.value
             ))
             return req
+    
+    def add_bulk_download_task (self, request_id: str):
+        if self.get_task(TaskType.BULK_DOWNLOAD, request_id):
+            return
 
-    def update_document_metadata (
-        self,
-        request: DocumentRequest,
-        date_submitted: datetime.datetime,
-        document_count: int,
-        department: str
-    ):
-        self.update_request(
-            request,
-            date_submitted = date_submitted,
-            document_count = document_count,
-            department = department,
-            date_checked = datetime.datetime.now()
+        WorkQueue.create(
+            task_type = TaskType.BULK_DOWNLOAD.value,
+            task_target_id = request_id
         )
     
-    def mark_document_downloaded (
-        self,
-        request: DocumentRequest,
-        paths: str,
-        count: int = 0,
-        checksum: str = None
-    ):
-        checksum = checksum if checksum else get_doc_md5(paths)
+    def add_download_task (self, request_id: str, doc_id: str, doc_name: str):
+        if self.get_task(TaskType.DOWNLOAD, request_id, doc_id):
+            return
 
-        self.update_request(
-            request,
-            request_status = RequestStatus.DOWNLOADED.value,
-            document_paths = paths,
-            date_checked = datetime.datetime.now(),
-            date_downloaded = datetime.datetime.now(),
-            document_count = count,
-            needs_download = False
+        WorkQueue.create(
+            task_type = TaskType.DOWNLOAD.value,
+            task_target_id = request_id,
+            document_id = doc_id,
+            document_name = doc_name
         )
+    
+    def add_update_task (self, request: FOIARequest):
+        WorkQueue.create(
+            task_type = TaskType.UPDATE_METADATA.value,
+            task_target = request
+        )
+    
+    def get_tasks (self, query = None):
+        return WorkQueue.select().where(query)
+    
+    def get_task(
+        self,
+        task_type: TaskType,
+        target_id: str,
+        document_id: str = None
+    ):
+        return WorkQueue.select().where(
+            (WorkQueue.task_type == task_type.value) &
+            (WorkQueue.task_target_id == target_id) &
+            (WorkQueue.document_id == document_id)
+        )
+    
+    def clear_tasks (self):
+        WorkQueue.delete().execute()
+    
+    def mark_task_completed (self, task: WorkQueue):
+        WorkQueue.delete().where(WorkQueue.id == task.id).execute()
 
-    def mark_document_closed (self, request: DocumentRequest):
+    def _add_download (
+        self, 
+        request: FOIARequest,
+        path: str,
+        is_bulk: bool,
+        document_count: int,
+        document_id: str = None
+    ) -> DocumentDownload:
+        checksum = get_doc_md5(path)
+        return (DocumentDownload.create(
+            request = request,
+            date_downloaded = datetime.datetime.now(),
+            is_bulk = is_bulk,
+            download_path = path,
+            checksum = checksum,
+            document_id = document_id,
+            document_count = document_count
+        ))
+
+    def add_download (self, request: FOIARequest, path: str, document_id: str) -> DocumentDownload:
+        return self._add_download(request, path, False, 1, document_id)
+    
+    def add_bulk_download (self, request: FOIARequest, path: str) -> DocumentDownload:
+        return self._add_download(request, path, True, request.document_count)
+    
+    def get_downloads (self, query = None) -> DocumentDownload:
+        return DocumentDownload.select().where(query)
+    
+    def get_download (
+        self,
+        request_id,
+        document_id
+    ):
+        return DocumentDownload.select().join(FOIARequest).where(
+            (DocumentDownload.document_id == document_id) &
+            (FOIARequest.request_id == request_id)
+        ).get_or_none()
+    
+    def mark_request_closed (self, request: FOIARequest):
         self.update_request(
             request, 
             date_checked = datetime.datetime.now(),
             request_status = RequestStatus.CLOSED.value
         )
 
-    def mark_document_error (self, request: DocumentRequest):
+    def mark_request_error (self, request: FOIARequest):
         self.update_request(
             request, 
             date_checked = datetime.datetime.now(),
@@ -163,12 +250,11 @@ class DBSession:
         )
 
 
-    def mark_document_pending (self, request: DocumentRequest, download = True):
+    def mark_request_pending (self, request: FOIARequest):
         self.update_request(
             request, 
             date_checked = datetime.datetime.now(),
-            request_status = RequestStatus.PENDING.value,
-            needs_download = download
+            request_status = RequestStatus.PENDING.value
         )
     
 
@@ -189,22 +275,19 @@ class DBSession:
         ).execute())
 
     def get_open_requests (self):
-        return DocumentRequest.select().where(DocumentRequest.request_status == RequestStatus.PENDING.value)
-
-    def remove_pending (self):
-        return DocumentRequest.delete().where(DocumentRequest.request_status == RequestStatus.PENDING.value).execute()
+        return FOIARequest.select().where(FOIARequest.request_status == RequestStatus.PENDING.value)
 
     def get_downloaded_requests (self, before_date: datetime.datetime = None):
-        query = DocumentRequest.request_status == RequestStatus.DOWNLOADED.value
+        query = None 
         if before_date:
-            query = query & (DocumentRequest.date_downloaded < before_date)
-        return self.get_requests(query)
+            query = DocumentDownload.date_downloaded < before_date
+        return self.get_downloads(query)
 
     def get_closed_requests (self):
-        return DocumentRequest.select().where(DocumentRequest.request_status == RequestStatus.CLOSED.value)
+        return FOIARequest.select().where(FOIARequest.request_status == RequestStatus.CLOSED.value)
 
     def get_error_requests (self):
-        return DocumentRequest.select().where(DocumentRequest.request_status == RequestStatus.ERROR.value)
+        return FOIARequest.select().where(FOIARequest.request_status == RequestStatus.ERROR.value)
     
     def get_stats (self) -> DatabaseStats:
         all_requests = list(self.get_requests())
