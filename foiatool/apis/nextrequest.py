@@ -1,4 +1,5 @@
 import foiatool.apis.common as common
+import foiatool.config as fconfig
 
 import requests
 import concurrent.futures
@@ -25,6 +26,7 @@ class NextRequestAPI:
         self._username = username
         self._password = password
         self._download_dir = download_dir
+        self._authenticated = False
 
         self._session = requests.Session()
         self._session.headers["user-agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
@@ -47,6 +49,9 @@ class NextRequestAPI:
         return self._session
     
     def sign_in (self):
+        if self._authenticated:
+            return 
+
         url = f"{self._url}/users/sign_in"
         sess = self._get_session(url)
 
@@ -58,6 +63,8 @@ class NextRequestAPI:
         }
         resp = sess.post(url, params=payload)
         resp.raise_for_status()
+        
+        self._authenticated = True
     
     def _download_document (self, request_id, doc_id, fname):
         # TODO: If there were some API to get document info from doc_id 
@@ -74,7 +81,8 @@ class NextRequestAPI:
         post_data = dict(
             request_id = request_id,
             bulk_action = "download",
-            doc_ids = doc_ids
+            all_selected = True,
+            visibility = "all"
         )
 
         resp = sess.put(f"{self._url}/client/documents/bulk", json=post_data)
@@ -170,15 +178,13 @@ class NextRequestAPI:
     
     def download_dir (self):
         return self._download_dir
+    
+    def url (self):
+        return self._url
 
 def initialize_nextrequest_client (
-    url: str,
-    download_root: str,
-    username: str,
-    password: str,
+    config: fconfig.RequestConfig
 ) -> NextRequestAPI:
-    url_parts = urllib.parse.urlparse(url)
-    download_dir = pathlib.Path(download_root) / url_parts.netloc
+    download_dir = common.get_download_dir(config)
     download_dir.mkdir(parents=True, exist_ok=True)
-    download_dir = str(download_dir)
-    return NextRequestAPI(url, download_dir, username, password)
+    return NextRequestAPI(config.url, str(download_dir), config.user, config.password)

@@ -8,12 +8,11 @@ import os
 from typing import List
 import shutil
 
-__FOIATOOLS_CONFIG__ = "config.toml"
+__FOIATOOLS_CONFIG__ = "foiatool.toml"
 __FOIATOOLS_DB__ = "foia.db"
 __FOIATOOLS_DIR__ = "foia"
 __FOIATOOLS_DOWNLOAD__ = "downloads"
 
-# TODO: Consider using pydantic...
 @dataclasses.dataclass
 class RequestConfig:
     url: str
@@ -24,12 +23,11 @@ class RequestConfig:
     ignore_ids: List[str]
     download_nice_seconds: int
     download_timeout_seconds: int
+    download_path: str
 
-# TODO: Consider using pydantic...
 @dataclasses.dataclass
 class Config:
     db_path: str
-    download_path: str
     request_config: List[RequestConfig]
 
 def default_config (root_dir: str):
@@ -37,9 +35,10 @@ def default_config (root_dir: str):
     download_dir = root_dir / __FOIATOOLS_DOWNLOAD__
     download_dir.mkdir(parents=True, exist_ok=True)
 
+    # Use relative paths to enable pain-free moving of the foia folder
+    # Paths get translated to absolute paths when loading the config
     return Config(
-        db_path=str(root_dir / __FOIATOOLS_DB__),
-        download_path=str(download_dir),
+        db_path= __FOIATOOLS_DB__,
         request_config=[
             RequestConfig(
                 url="",
@@ -49,7 +48,8 @@ def default_config (root_dir: str):
                 document_search_terms=[],
                 ignore_ids=[],
                 download_nice_seconds=2,
-                download_timeout_seconds = 1200
+                download_timeout_seconds = 1200,
+                download_path=__FOIATOOLS_DOWNLOAD__
             ),
         ]
     )
@@ -81,46 +81,44 @@ def load_config (path: str) -> Config:
     if not os.path.exists(path):
         raise RuntimeError(f"Config not found at {path}")
     
-    _, ext = os.path.splitext(path)
+    root_dir = os.path.dirname(path)
     with open(path, 'r') as f:
-        if ext == "json":
-            config = json.load(f)
-        elif "toml":
-            config = toml.load(f)
-        else:
-            raise Exception("Invalid configuration format")
+        config = toml.load(f)
 
-        arr = [RequestConfig(**v) for v in config["request_config"]]
+        request_configs = [RequestConfig(**v) for v in config["request_config"]]
         del config["request_config"]
-        config = Config(request_config=arr, **config)
-        verify_config(config)
-        return config
 
+        config = Config(request_config=request_configs, **config)
+
+        # make paths absolute
+        if not os.path.isabs(config.db_path):
+            config.db_path = os.path.abspath(os.path.join(root_dir, config.db_path))
+
+        for rc in config.request_config:
+            if not os.path.isabs(rc.download_path):
+                rc.download_path = os.path.abspath(os.path.join(root_dir, rc.download_path))
+
+        return config
 
 def find_project_dir (start_dir = None):
     if not start_dir:
         start_dir = os.getcwd()
+
     current = pathlib.Path(os.path.abspath(start_dir))
     
     while current.parent != current:
-        if (current / __FOIATOOLS_DIR__).exists():
-            return current / __FOIATOOLS_DIR__
+        if (current / __FOIATOOLS_CONFIG__).exists():
+            return current
         current = current.parent
 
     return None
 
 def find_config_path (start_dir = None):
     if pdir := find_project_dir(start_dir):
-        path = os.path.join(pdir, "config.toml")
+        path = os.path.join(pdir, __FOIATOOLS_CONFIG__)
         return str(path)
     return None
 
-# TODO: Use pydantic
-def verify_config (config: Config):
-    for rc in config.request_config:
-        if not rc.url:
-            raise Exception(f"Invalid URL {rc.url} found in request configs")
-    return None
 
     
 

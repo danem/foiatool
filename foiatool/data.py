@@ -70,8 +70,9 @@ class DocumentDownload (pw.Model):
 
 class WorkQueue (pw.Model):
     id = pw.PrimaryKeyField()
+    target_source = pw.CharField()
     task_type = pw.IntegerField()
-    task_target_id = pw.CharField(null = True) # some documents don't have requests
+    task_target_id = pw.CharField()
     document_name = pw.CharField(null = True)
     document_id = pw.CharField(null = True)
 
@@ -113,8 +114,8 @@ class DBSession:
     
     def get_request (
         self,
-        request_id: str,
         scrape_source: str,
+        request_id: str
     ) -> Optional[FOIARequest]:
         return (FOIARequest.get_or_none(
             (FOIARequest.scrape_source == scrape_source) & 
@@ -126,6 +127,7 @@ class DBSession:
         FOIARequest.update(
             **kwargs
         ).where(where).execute()
+
     
     def add_request (
         self,
@@ -136,8 +138,15 @@ class DBSession:
         department: str,
         document_count: int
     ):
-        if req := self.get_request(request_id, scrape_source):
-            return req
+        if req := self.get_request(scrape_source, request_id):
+            self.update_request(
+                req,
+                department = department,
+                document_count = document_count,
+                date_checked = datetime.datetime.now(),
+                request_status = request_status.value
+            )
+            return self.get_request(scrape_source, request_id)
         else:
             req = (FOIARequest.create(
                 scrape_source = scrape_source,
@@ -149,47 +158,58 @@ class DBSession:
                 request_status = request_status.value
             ))
             return req
+
+    def get_task(
+        self,
+        task_type: TaskType,
+        target_source: str,
+        target_id: str,
+        document_id: str = None
+    ):
+        return WorkQueue.select().where(
+            (WorkQueue.target_source == target_source) &
+            (WorkQueue.task_type == task_type.value) &
+            (WorkQueue.task_target_id == target_id) &
+            (WorkQueue.document_id == document_id)
+        )
     
-    def add_bulk_download_task (self, request_id: str):
-        if self.get_task(TaskType.BULK_DOWNLOAD, request_id):
+    def add_bulk_download_task (self, target_source: str, request_id: str):
+        if self.get_task(TaskType.BULK_DOWNLOAD, target_source, request_id):
             return
 
         WorkQueue.create(
+            target_source = target_source,
             task_type = TaskType.BULK_DOWNLOAD.value,
             task_target_id = request_id
         )
     
-    def add_download_task (self, request_id: str, doc_id: str, doc_name: str):
-        if self.get_task(TaskType.DOWNLOAD, request_id, doc_id):
+    def add_download_task (self, target_source: str, request_id: str, doc_id: str, doc_name: str):
+        if self.get_task(TaskType.DOWNLOAD, target_source, request_id, doc_id):
             return
 
         WorkQueue.create(
+            target_source = target_source,
             task_type = TaskType.DOWNLOAD.value,
             task_target_id = request_id,
             document_id = doc_id,
             document_name = doc_name
         )
     
-    def add_update_task (self, request: FOIARequest):
+    def add_update_task (self, target_source: str, request_id: str):
+        if self.get_task(TaskType.UPDATE_METADATA, target_source, request_id):
+            return
+
         WorkQueue.create(
+            target_source = target_source,
             task_type = TaskType.UPDATE_METADATA.value,
-            task_target = request
+            task_target_id = request_id
         )
     
     def get_tasks (self, query = None):
         return WorkQueue.select().where(query)
     
-    def get_task(
-        self,
-        task_type: TaskType,
-        target_id: str,
-        document_id: str = None
-    ):
-        return WorkQueue.select().where(
-            (WorkQueue.task_type == task_type.value) &
-            (WorkQueue.task_target_id == target_id) &
-            (WorkQueue.document_id == document_id)
-        )
+    def get_tasks_for_source (self, target_source: str):
+        return self.get_tasks(WorkQueue.target_source == target_source)
     
     def clear_tasks (self):
         WorkQueue.delete().execute()
@@ -227,12 +247,25 @@ class DBSession:
     
     def get_download (
         self,
-        request_id,
-        document_id
+        scrape_source: str,
+        request_id: str,
+        document_id: str
     ):
         return DocumentDownload.select().join(FOIARequest).where(
             (DocumentDownload.document_id == document_id) &
+            (FOIARequest.scrape_source == scrape_source) &
             (FOIARequest.request_id == request_id)
+        ).get_or_none()
+
+    def get_bulk_download (
+        self,
+        scrape_source: str,
+        request_id: str,
+    ):
+        return DocumentDownload.select().join(FOIARequest).where(
+            (DocumentDownload.is_bulk == True) &
+            (FOIARequest.request_id == request_id) &
+            (FOIARequest.scrape_source == scrape_source)
         ).get_or_none()
     
     def mark_request_closed (self, request: FOIARequest):
@@ -248,7 +281,6 @@ class DBSession:
             date_checked = datetime.datetime.now(),
             request_status = RequestStatus.ERROR.value
         )
-
 
     def mark_request_pending (self, request: FOIARequest):
         self.update_request(

@@ -1,7 +1,16 @@
+import foiatool.config as fconfig
+
 import requests
 import pathlib
 import tqdm
 import os
+import re
+import urllib
+
+def get_download_dir (config: fconfig.RequestConfig) -> pathlib.Path:
+    url_parts = urllib.parse.urlparse(config.url)
+    download_dir = pathlib.Path(config.download_path) / url_parts.netloc
+    return download_dir
 
 def truncate_file_name (
     file_name: str
@@ -20,6 +29,7 @@ def normalize_file_name (
     out_dir = pathlib.Path(download_dir) / folder_name
     out_dir.mkdir(parents=True, exist_ok=True)
     file_name = truncate_file_name(file_name)
+    file_name = re.sub("[:/]","_", file_name)
     return str(out_dir / file_name)
 
 def download_file(session: requests.Session, url: str, outpath: str = None, display_progress: bool = False):

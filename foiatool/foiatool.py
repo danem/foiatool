@@ -13,7 +13,7 @@ import urllib.parse
 import concurrent
 import datetime
 
-def _parse_datetime(txt: str, permissive:bool = False):
+def parse_datetime(txt: str, permissive:bool = False):
     return dparser.parse(txt, fuzzy=permissive)
 
 def get_user_choice (prompt, default = False):
@@ -47,7 +47,7 @@ def fetch_new_requests (
                 for item in page:
                     if dbsess.get_request(item["id"], config.url) or item["id"] in config.ignore_ids:
                         continue
-                    dbsess.add_bulk_download_task(item["id"])
+                    dbsess.add_bulk_download_task(driver.url(), item["id"])
                     pbar.update(1)
 
                 # Be nice
@@ -66,10 +66,10 @@ def fetch_new_requests (
                     title = item["title"]
                     fname = f"{doc_id}_{title}"
 
-                    if not request_id or dbsess.get_download(request_id, doc_id):
+                    if not request_id or dbsess.get_download(driver.url(), request_id, doc_id):
                         continue
 
-                    dbsess.add_download_task(request_id, doc_id, fname)
+                    dbsess.add_download_task(driver.url(), request_id, doc_id, fname)
                     pbar.update(1)
 
                 # Be nice
@@ -87,7 +87,7 @@ def visit_pending_requests (
     dbsess: fdb.DBSession,
     driver: fapi.NextRequestAPI
 ):
-    pending = dbsess.get_tasks()
+    pending = dbsess.get_tasks_for_source(config.url)
 
     logging.info(f"Found {len(pending)} requests in the queue. Visiting")
     logging.info(f"Ignoring requests: {config.ignore_ids}")
@@ -97,14 +97,14 @@ def visit_pending_requests (
     error_count = 0
     pbar = tqdm.tqdm(pending)
     for req in pbar:
-        pbar.set_description(f"Fetching request {req.task_target_id}")
+        pbar.set_description(f"Fetching request information {req.task_target_id}")
         req_info = driver.get_request_info(req.task_target_id)
         req_status = fdb.status_from_str(req_info["request_state"])
 
         dept_names = req_info["department_names"]
         doc_info = driver.get_docs_info_for_request(req_info["pretty_id"])
         doc_count = doc_info.get("total_documents_count", 0)
-        request_date = _parse_datetime(req_info.get("request_date", ""), True)
+        request_date = parse_datetime(req_info.get("request_date", ""), True)
 
         foia_request = dbsess.add_request(
             config.url,
@@ -116,6 +116,7 @@ def visit_pending_requests (
         )
 
         if req.task_type not in [fdb.TaskType.DOWNLOAD.value, fdb.TaskType.BULK_DOWNLOAD.value]:
+            dbsess.mark_task_completed(req)
             continue
 
         try:
@@ -124,10 +125,12 @@ def visit_pending_requests (
                 promise = driver.download_document(req.task_target_id, req.document_id, req.document_name)
                 result_path = promise.result(config.download_timeout_seconds)
                 dbsess.add_download(foia_request, result_path, req.document_id)
+                dbsess.mark_task_completed(req)
             else:
                 if req_status != fdb.RequestStatus.CLOSED:
+                    # Keep the task on the queue
                     continue
-                promise = driver.download_docs_for_request(req.request_id)
+                promise = driver.download_docs_for_request(req.task_target_id)
                 result_path = promise.result(config.download_timeout_seconds)
                 dbsess.add_bulk_download(foia_request, result_path)
         except (TimeoutError, concurrent.futures.InvalidStateError, fapi.DownloadException, fapi.HTTPException, fapi.ConnectionException):
@@ -136,7 +139,6 @@ def visit_pending_requests (
             error_count += 1
             pbar.set_postfix({"errors": error_count})
 
-        dbsess.mark_task_completed(req)
         # Be nice
         time.sleep(config.download_nice_seconds)
 
@@ -197,15 +199,27 @@ def repair_data (
     logging.info(f"Found {bad_count} broken records")
     visit_pending_requests(config, dbsess, nrapi)
 
-def fetch_request (
+def fetch_request_documents (
     config: fconfig.RequestConfig,
     dbsess: fdb.DBSession,
     nrapi: fapi.NextRequestAPI,
     request_id
-):
-    logging.info("Fetching a single request")
-    dbsess.add_bulk_download_task(request_id)
+) -> fdb.DocumentDownload:
+    logging.info("Fetching documents for a single request")
+    dbsess.add_bulk_download_task(nrapi.url(), request_id)
     visit_pending_requests(config, dbsess, nrapi)
+    return dbsess.get_bulk_download(request_id, nrapi.url())
+
+def fetch_request_info (
+    config: fconfig.RequestConfig,
+    dbsess: fdb.DBSession,
+    nrapi: fapi.NextRequestAPI,
+    request_id
+) -> fdb.FOIARequest:
+    logging.info("Fetching info for a single request")
+    dbsess.add_update_task(config.url, request_id)
+    visit_pending_requests(config, dbsess, nrapi)
+    return dbsess.get_request(config.url, request_id)
 
 
 def main ():
@@ -276,11 +290,7 @@ document_count: {stats.document_count}"""
     apis_lut = {}
     for rc in config.request_config:
         url_parts = urllib.parse.urlparse(rc.url)
-        api = fapi.initialize_nextrequest_client(
-            rc.url,
-            config.download_path,
-            rc.user, rc.password,
-        )
+        api = fapi.initialize_nextrequest_client(rc)
         apis_lut[url_parts.netloc] = (api, rc)
 
 
@@ -298,7 +308,7 @@ document_count: {stats.document_count}"""
         if res := apis_lut.get(url_parts.netloc):
             nrapi, conf = res
             req_id = url_parts.path.strip("/").split("/")[-1]
-            fetch_request(conf, dbsess, nrapi, req_id)
+            fetch_request_documents(conf, dbsess, nrapi, req_id)
         else:
             logging.error(f"No configuration found for the provided url: {url_parts.netloc}")
             return

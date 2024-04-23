@@ -16,11 +16,10 @@ Generate a config file:
 foiatool init
 ```
 
-Edit the config file `foia/config.toml`:
+Edit the config file `foia/foiatool.toml`:
 
 ```toml
-db_path = "<PATH TO FOIA DB>"
-download_path = "<PATH TO FOIA DOWNLOAD FOLDER>"
+db_path = "foia.db"
 
 [[request_config]]
 url = "https://sanfrancisco.nextrequest.com"
@@ -31,6 +30,7 @@ document_search_terms = ["budget"]
 ignore_ids = ["123"]
 download_timeout = 1200
 download_nice_seconds = 2
+download_path = "downloads"
 
 [[request_config]]
 url = "https://another_site.nextrequest.com"
@@ -41,7 +41,10 @@ document_search_terms = []
 ignore_ids = []
 download_timeout = 1200
 download_nice_seconds = 2
+download_path = "downloads"
 ```
+
+Paths can be specified as absolute or relative paths.
 
 Run downloader:
 ```
