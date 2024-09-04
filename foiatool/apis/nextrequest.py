@@ -63,7 +63,7 @@ class NextRequestAPI:
 
         self._authenticated = True
 
-    def _download_documen(self, request_id, doc_id, fname):
+    def _download_document(self, request_id, doc_id, fname):
         # TODO: If there were some API to get document info from doc_id
         # I'd only need doc_id and not request_id or fname
         session = self._get_session()
